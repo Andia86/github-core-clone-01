@@ -345,21 +345,22 @@ export function readPack(pack: Buffer, resolveExternal?: (oid: string) => GitObj
         back = ((back + 1) << 7) | (b & 0x7f);
       }
       const baseOffset = start - back;
-      const raw = inflateSync(pack.subarray(off, bodyEnd));
-      off += consumedCompressed(pack, off, raw.length, bodyEnd);
-      pending.push({ baseOffset, delta: raw, offset: start });
+      const got = inflateStreamAt(pack, off, bodyEnd);
+      off += got.consumed;
+      pending.push({ baseOffset, delta: got.raw, offset: start });
     } else if (typeId === 7) {
       // REF_DELTA
       const baseOid = pack.subarray(off, off + 20).toString('hex');
       off += 20;
-      const raw = inflateSync(pack.subarray(off, bodyEnd));
-      off += consumedCompressed(pack, off, raw.length, bodyEnd);
-      pending.push({ baseOid, delta: raw, offset: start });
+      const got = inflateStreamAt(pack, off, bodyEnd);
+      off += got.consumed;
+      pending.push({ baseOid, delta: got.raw, offset: start });
     } else {
       const type = ID_TYPES[typeId];
       if (!type) throw new Error(`bad pack object type ${typeId}`);
-      const raw = inflateSync(pack.subarray(off, bodyEnd));
-      off += consumedCompressed(pack, off, raw.length, bodyEnd);
+      const got = inflateStreamAt(pack, off, bodyEnd);
+      const raw = got.raw;
+      off += got.consumed;
       if (raw.length !== size) throw new Error('pack object size mismatch');
       const oid = hashObject(type, raw);
       found.set(oid, { type, data: Buffer.from(raw) });
@@ -399,23 +400,16 @@ export function readPack(pack: Buffer, resolveExternal?: (oid: string) => GitObj
   return { objects: found, count };
 }
 
-/** How many compressed bytes inflate to `rawLen` bytes starting at `off` (binary search by trial inflate is wasteful; use zlib stream length probing via incremental slices is also wasteful — instead track via deflate block structure is overkill: callers inflate with subarray to bodyEnd and we measure by re-inflating prefixes is O(n^2) on big packs. For our pack sizes (<= ~1 MB, small objects) probing is fine.) */
-function consumedCompressed(pack: Buffer, off: number, _rawLen: number, bodyEnd: number): number {
-  // zlib streams are self-terminating; find the end by trying increasing
-  // slice lengths only when the naive full-slice inflate succeeded — in
-  // practice inflateSync consumed the stream but does not report length.
-  // Use a streaming inflater for exactness.
-  return streamInflateLength(pack, off, bodyEnd);
-}
-
-import { createInflate } from 'node:zlib';
-
-function streamInflateLength(pack: Buffer, off: number, bodyEnd: number): number {
-  // Synchronous trick: inflateSync on progressively larger slices is O(n^2);
-  // packs here are small (suite-built), so cap the search smartly: the stream
-  // ends when inflate stops throwing 'unexpected end of file'. Binary search.
-  let lo = 1;
-  let hi = bodyEnd - off;
+/**
+ * Inflate the zlib stream starting at `off` and report how many compressed
+ * bytes it occupied. inflateSync hides the stream end (it silently ignores
+ * trailing bytes), so the exact length is found by probing: an exponential
+ * search brackets the end — a failed inflate only decodes up to the slice
+ * end, keeping the wasted work under about twice the stream's own size —
+ * then a bisect inside the bracket pins the first length that inflates.
+ */
+function inflateStreamAt(pack: Buffer, off: number, bodyEnd: number): { raw: Buffer; consumed: number } {
+  const max = bodyEnd - off;
   const ok = (len: number): boolean => {
     try {
       inflateSync(pack.subarray(off, off + len));
@@ -424,15 +418,27 @@ function streamInflateLength(pack: Buffer, off: number, bodyEnd: number): number
       return false;
     }
   };
-  if (ok(hi)) {
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (ok(mid)) hi = mid;
-      else lo = mid + 1;
+  let tooShort = 0;
+  let good = -1;
+  let probe = 128;
+  while (good < 0) {
+    const len = Math.min(probe, max);
+    if (ok(len)) {
+      good = len;
+    } else {
+      tooShort = len;
+      if (len >= max) throw new Error('corrupt zlib stream in pack');
+      probe *= 2;
     }
-    return lo;
   }
-  throw new Error('corrupt zlib stream in pack');
+  let lo = tooShort + 1;
+  let hi = good;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (ok(mid)) hi = mid;
+    else lo = mid + 1;
+  }
+  return { raw: inflateSync(pack.subarray(off, off + lo)), consumed: lo };
 }
 
 // --- pack write --------------------------------------------------------------

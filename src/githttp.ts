@@ -155,10 +155,37 @@ function parseFetchArgs(packets: ReturnType<typeof parsePktLines>): FetchArgs {
   return args;
 }
 
+/**
+ * Memo key for a fetch negotiation: the arguments plus a fingerprint of the
+ * repository's git state. Object contents are content-addressed and the
+ * store only grows; every mutation lands inside a single request together
+ * with a ref move or store growth, so a changed state always changes the
+ * fingerprint and recomputes instead of serving stale bytes.
+ */
+function fetchMemoKey(rec: RepoRec, args: FetchArgs): string {
+  const refs = [...rec.refs.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([k, v]) => `${k}=${v}`)
+    .join(';');
+  const fingerprint = sha1Hex(Buffer.from(`${refs}|${rec.store.size}`, 'utf8'));
+  const argsJson = JSON.stringify([args.wants, args.wantRefs, args.haves, args.shallow, args.deepen, args.deepenSince, args.deepenNot]);
+  return sha1Hex(Buffer.from(`${fingerprint}|${argsJson}`, 'utf8'));
+}
+
 function fetchResponse(rec: RepoRec, args: FetchArgs): Buffer {
   if (!args.done && args.waitForDone) {
     return Buffer.concat([pktText('acknowledgments'), pktText('ready'), PKT_FLUSH]);
   }
+  const key = fetchMemoKey(rec, args);
+  const hit = rec.fetchCache.get(key);
+  if (hit) return hit;
+  const out = computeFetchResponse(rec, args);
+  if (rec.fetchCache.size > 64) rec.fetchCache.clear();
+  rec.fetchCache.set(key, out);
+  return out;
+}
+
+function computeFetchResponse(rec: RepoRec, args: FetchArgs): Buffer {
   const store = rec.store;
   // Resolve wants (oids, tag objects, want-refs).
   const wantOids: string[] = [];
@@ -245,7 +272,7 @@ function fetchResponse(rec: RepoRec, args: FetchArgs): Buffer {
       const obj = store.get(oid);
       if (obj) objects.push(obj);
     }
-    pack = writePack(objects, 6);
+    pack = writePack(objects, 1);
     if (rec.packCache.size > 64) rec.packCache.clear();
     rec.packCache.set(cacheKey, pack);
   }

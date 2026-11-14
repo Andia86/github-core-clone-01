@@ -80,6 +80,7 @@ export interface RepoRec {
   createdAt: string;
   updatedAt: string;
   packCache: Map<string, Buffer>;
+  fetchCache: Map<string, Buffer>;
   jsonCache: Map<string, string>;
 }
 
@@ -118,6 +119,7 @@ export class Forge {
       createdAt: ts,
       updatedAt: ts,
       packCache: new Map(),
+      fetchCache: new Map(),
       jsonCache: new Map(),
     };
     for (const label of DEFAULT_LABELS) {
