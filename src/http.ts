@@ -53,16 +53,42 @@ export function conflict(res: ServerResponse, message: string): void {
   sendJson(res, 409, { message });
 }
 
-export async function readBody(req: IncomingMessage, limit = 64 * 1024 * 1024): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of req) {
-    const buf = chunk as Buffer;
-    total += buf.length;
-    if (total > limit) throw new Error('request body too large');
-    chunks.push(buf);
-  }
-  return Buffer.concat(chunks);
+export function readBody(req: IncomingMessage, limit = 64 * 1024 * 1024): Promise<Buffer> {
+  // Explicit data/end handlers instead of the async iterator: the iterator
+  // machinery costs real microseconds on every request body (issue creates,
+  // receive-pack), and most bodies arrive as a single chunk, which is
+  // returned without a concat copy.
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let settled = false;
+    req.on('data', (chunk: Buffer) => {
+      if (settled) return;
+      total += chunk.length;
+      if (total > limit) {
+        settled = true;
+        reject(new Error('request body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (settled) return;
+      settled = true;
+      resolve(chunks.length === 1 ? (chunks[0] as Buffer) : Buffer.concat(chunks));
+    });
+    req.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
+    req.on('close', () => {
+      if (settled) return;
+      settled = true;
+      reject(new Error('request body stream closed early'));
+    });
+  });
 }
 
 /** Parse a JSON body; returns {ok} so handlers can answer 400 on malformed input. */
