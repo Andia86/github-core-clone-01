@@ -280,6 +280,64 @@ export function issueJson(repo: RepoRec, issue: IssueRec): Record<string, unknow
   };
 }
 
+// --- pre-serialized fragments -------------------------------------------------
+// The write workload creates issue after issue; rebuilding the same user and
+// label objects (and re-walking them in JSON.stringify) for every response
+// is pure waste. User and label JSON depend only on values fixed at creation
+// (labels are never mutated in place), so both are serialized once and the
+// issue body is assembled from the fragments. The output is byte-identical
+// to JSON.stringify(issueJson(...)): same fields, same order, same values.
+
+const userJsonTextCache = new Map<string, string>();
+
+export function userJsonText(login: string): string {
+  let text = userJsonTextCache.get(login);
+  if (text === undefined) {
+    text = JSON.stringify(userJson(login));
+    userJsonTextCache.set(login, text);
+  }
+  return text;
+}
+
+const labelJsonTextCache = new WeakMap<LabelRec, string>();
+
+export function labelJsonText(rec: LabelRec): string {
+  let text = labelJsonTextCache.get(rec);
+  if (text === undefined) {
+    text = JSON.stringify(labelJson(rec));
+    labelJsonTextCache.set(rec, text);
+  }
+  return text;
+}
+
+const quote = (s: string): string => JSON.stringify(s);
+
+/** Byte-identical stand-in for JSON.stringify(issueJson(repo, issue)). */
+export function serializeIssue(repo: RepoRec, issue: IssueRec): string {
+  const labelParts: string[] = [];
+  for (const name of issue.labels) {
+    const rec = repo.labels.get(name);
+    if (rec) {
+      labelParts.push(labelJsonText(rec));
+    } else {
+      labelParts.push(`{"id":0,"node_id":"","name":${quote(name)},"color":"ededed","default":false,"description":""}`);
+    }
+  }
+  const base = `/api/v3/repos/${repo.owner}/${repo.name}/issues/${issue.number}`;
+  return (
+    `{"id":${issue.id},"node_id":${quote(globalId('Issue', issue.id))},"number":${issue.number},` +
+    `"title":${quote(issue.title)},"body":${quote(issue.body)},"state":${quote(issue.state)},"locked":false,` +
+    `"labels":[${labelParts.join(',')}],"user":${userJsonText(issue.user)},` +
+    `"assignee":null,"assignees":[],"milestone":null,"comments":${issue.comments.length},` +
+    `"created_at":${quote(issue.createdAt)},"updated_at":${quote(issue.updatedAt)},` +
+    `"closed_at":${issue.state === 'closed' ? quote(issue.updatedAt) : 'null'},` +
+    `"html_url":${quote(`https://example.invalid/${repo.owner}/${repo.name}/issues/${issue.number}`)},` +
+    `"url":${quote(base)},"repository_url":${quote(`/api/v3/repos/${repo.owner}/${repo.name}`)},` +
+    `"labels_url":${quote(`${base}/labels{/name}`)},"comments_url":${quote(`${base}/comments`)},` +
+    `"events_url":${quote(`${base}/events`)},"author_association":"OWNER"}`
+  );
+}
+
 export function pullJson(repo: RepoRec, pull: PullRec): Record<string, unknown> {
   const refSide = (ref: string, sha: string) => ({
     label: `${repo.owner}:${ref}`,

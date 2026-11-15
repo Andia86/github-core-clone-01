@@ -9,6 +9,7 @@ import {
   type PullRec,
   repoJson,
   issueJson,
+  serializeIssue,
   pullJson,
   commentJson,
   commitJson,
@@ -409,7 +410,7 @@ export function issueBody(repo: RepoRec, issue: IssueRec): Buffer {
   const key = `issue:${issue.number}:${issue.updatedAt}`;
   let cached = repo.bodyCache.get(key);
   if (!cached) {
-    cached = Buffer.from(`${JSON.stringify(issueJson(repo, issue))}\n`, 'utf8');
+    cached = Buffer.from(`${serializeIssue(repo, issue)}\n`, 'utf8');
     repo.bodyCache.set(key, cached);
   }
   return cached;
