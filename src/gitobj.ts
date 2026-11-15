@@ -1,7 +1,7 @@
 // The git object layer: sha1 objects, pack read/write, history walks,
 // three-way tree merges and line diffs. Pure Node stdlib (zlib + crypto).
 
-import { inflateSync, deflateSync } from 'node:zlib';
+import { createInflate, inflateSync, deflateSync, constants as zlibConstants } from 'node:zlib';
 import { sha1Hex, ZERO_OID } from './util.ts';
 
 export type ObjType = 'commit' | 'tree' | 'blob' | 'tag';
@@ -345,20 +345,20 @@ export function readPack(pack: Buffer, resolveExternal?: (oid: string) => GitObj
         back = ((back + 1) << 7) | (b & 0x7f);
       }
       const baseOffset = start - back;
-      const got = inflateStreamAt(pack, off, bodyEnd);
+      const got = inflateStreamAt(pack, off, bodyEnd, size);
       off += got.consumed;
       pending.push({ baseOffset, delta: got.raw, offset: start });
     } else if (typeId === 7) {
       // REF_DELTA
       const baseOid = pack.subarray(off, off + 20).toString('hex');
       off += 20;
-      const got = inflateStreamAt(pack, off, bodyEnd);
+      const got = inflateStreamAt(pack, off, bodyEnd, size);
       off += got.consumed;
       pending.push({ baseOid, delta: got.raw, offset: start });
     } else {
       const type = ID_TYPES[typeId];
       if (!type) throw new Error(`bad pack object type ${typeId}`);
-      const got = inflateStreamAt(pack, off, bodyEnd);
+      const got = inflateStreamAt(pack, off, bodyEnd, size);
       const raw = got.raw;
       off += got.consumed;
       if (raw.length !== size) throw new Error('pack object size mismatch');
@@ -402,13 +402,90 @@ export function readPack(pack: Buffer, resolveExternal?: (oid: string) => GitObj
 
 /**
  * Inflate the zlib stream starting at `off` and report how many compressed
- * bytes it occupied. inflateSync hides the stream end (it silently ignores
- * trailing bytes), so the exact length is found by probing: an exponential
- * search brackets the end — a failed inflate only decodes up to the slice
- * end, keeping the wasted work under about twice the stream's own size —
- * then a bisect inside the bracket pins the first length that inflates.
+ * bytes it occupied. The fast path decodes in ONE pass through the stream's
+ * own synchronous write path — the same machinery inflateSync runs — which
+ * reports what probing cannot: after each writeSync, `_writeState[1]` holds
+ * the input bytes the decoder left unconsumed, so consumed = fed − leftover
+ * and no byte is decoded twice. (The public `bytesRead` does not exist on
+ * Node's zlib streams; `_writeState` is the counter processChunkSync itself
+ * reads.) Integrity is unchanged: the caller still checks the inflated size,
+ * every object is re-hashed, and the pack trailer sha1 was verified before
+ * parsing began. When the internals are unavailable (other Node builds) the
+ * probing decoder below is used instead: an exponential search brackets the
+ * stream end, then a bisect pins the first length that inflates.
  */
-function inflateStreamAt(pack: Buffer, off: number, bodyEnd: number): { raw: Buffer; consumed: number } {
+interface ZlibSyncHandle {
+  writeSync: (flush: number, inBuf: Buffer, inOff: number, inLen: number, outBuf: Buffer, outOff: number, outLen: number) => void;
+}
+interface InflateInternals {
+  _handle?: ZlibSyncHandle;
+  _writeState?: Uint32Array;
+  on: (event: 'error', cb: (err: Error) => void) => void;
+  destroy: () => void;
+}
+
+let exactInflateOk: boolean | null = null;
+
+function inflateExactOnce(input: Buffer, expectedSize: number): { raw: Buffer; consumed: number } {
+  const inf = createInflate() as unknown as InflateInternals;
+  const handle = inf._handle;
+  const state = inf._writeState;
+  if (!handle || !state) throw new Error('zlib sync internals unavailable');
+  let streamError: Error | null = null;
+  inf.on('error', (err: Error) => {
+    streamError = err;
+  });
+  let out = Buffer.alloc(Math.min(Math.max(16384, expectedSize), 1 << 22));
+  let inOff = 0;
+  let availIn = input.length;
+  let consumed = 0;
+  let produced = 0;
+  let outOff = 0;
+  try {
+    for (let iter = 0; iter < 128; iter += 1) {
+      const availOutBefore = out.length - outOff;
+      handle.writeSync(zlibConstants.Z_NO_FLUSH, input, inOff, availIn, out, outOff, availOutBefore);
+      if (streamError) throw streamError;
+      const availOutAfter = state[0] as number;
+      const availInAfter = state[1] as number;
+      const inDelta = availIn - availInAfter;
+      consumed += inDelta;
+      produced += availOutBefore - availOutAfter;
+      outOff += availOutBefore - availOutAfter;
+      if (produced > expectedSize) throw new Error('pack object size mismatch');
+      // Stop when the input ran out, or the decoder stopped with input and
+      // output room to spare (stream end), or the object is complete.
+      if (availInAfter === 0 || availOutAfter > 0 || produced >= expectedSize) break;
+      // Output buffer filled before the object ended: grow and continue
+      // with the input the decoder has not consumed yet.
+      const bigger = Buffer.alloc(out.length * 2);
+      out.copy(bigger);
+      out = bigger;
+      inOff += inDelta;
+      availIn = availInAfter;
+    }
+  } finally {
+    inf.destroy();
+  }
+  if (produced !== expectedSize) throw new Error('pack object size mismatch');
+  return { raw: Buffer.from(out.subarray(0, produced)), consumed };
+}
+
+function inflateStreamAt(pack: Buffer, off: number, bodyEnd: number, expectedSize: number): { raw: Buffer; consumed: number } {
+  if (exactInflateOk === null) {
+    try {
+      const sample = deflateSync(Buffer.from('forge', 'utf8'));
+      const got = inflateExactOnce(Buffer.concat([sample, Buffer.from('TAIL', 'utf8')]), 5);
+      exactInflateOk = got.consumed === sample.length && got.raw.toString('utf8') === 'forge';
+    } catch {
+      exactInflateOk = false;
+    }
+  }
+  if (exactInflateOk) return inflateExactOnce(pack.subarray(off, bodyEnd), expectedSize);
+  return inflateStreamAtProbe(pack, off, bodyEnd);
+}
+
+function inflateStreamAtProbe(pack: Buffer, off: number, bodyEnd: number): { raw: Buffer; consumed: number } {
   const max = bodyEnd - off;
   const ok = (len: number): boolean => {
     try {
