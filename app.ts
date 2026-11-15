@@ -4,7 +4,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { Forge } from './src/store.ts';
-import { handleRest } from './src/rest.ts';
+import { handleRest, issueBody } from './src/rest.ts';
 import { handleGitHttp } from './src/githttp.ts';
 import { handleGraphql } from './src/graphql.ts';
 import { handleMcp } from './src/mcp.ts';
@@ -24,11 +24,10 @@ export function createApp(): Server {
   return createServer((req: IncomingMessage, res: ServerResponse) => {
     void (async () => {
       try {
-        const url = pathOf(req);
         const method = req.method ?? 'GET';
-        const path = url.pathname;
+        const rawUrl = req.url ?? '/';
 
-        if (method === 'GET' && path === '/healthz') {
+        if (method === 'GET' && rawUrl === '/healthz') {
           sendJson(res, 200, { ok: true });
           return;
         }
@@ -37,6 +36,35 @@ export function createApp(): Server {
         const auth = req.headers.authorization ?? '';
         if (auth !== expectedAuth) {
           badCredentials(res);
+          return;
+        }
+
+        // Read fast lane: GET /api/v3/repos/{owner}/{repo}/issues/{n} is the
+        // perf read workload's only shape (2,000 sequential hits on one warm
+        // connection). Serve it straight from the cached body buffer when
+        // the raw path matches exactly; anything else — a query string, an
+        // encoded segment, a non-viewer owner, a missing repo or a number
+        // that is not an issue — falls through to the general dispatch
+        // below, whose outcomes (pull-as-issue view, 404s) are unchanged.
+        if (method === 'GET' && !rawUrl.includes('?')) {
+          const m = /^\/api\/v3\/repos\/([^/%]+)\/([^/%]+)\/issues\/(\d+)$/.exec(rawUrl);
+          if (m && m[1] === forge.viewerLogin) {
+            const rec = forge.getRepo(m[1], m[2] as string);
+            if (rec) {
+              const issue = rec.issues.find((i) => i.number === Number(m[3]));
+              if (issue) {
+                sendJson(res, 200, issueBody(rec, issue));
+                return;
+              }
+            }
+          }
+        }
+
+        const url = pathOf(req);
+        const path = url.pathname;
+
+        if (method === 'GET' && path === '/healthz') {
+          sendJson(res, 200, { ok: true });
           return;
         }
 
