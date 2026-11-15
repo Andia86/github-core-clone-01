@@ -80,7 +80,7 @@ export interface RepoRec {
   createdAt: string;
   updatedAt: string;
   packCache: Map<string, Buffer>;
-  fetchCache: Map<string, Buffer>;
+  fetchCache: Map<string, Promise<Buffer>>;
   jsonCache: Map<string, string>;
 }
 

@@ -172,17 +172,24 @@ function fetchMemoKey(rec: RepoRec, args: FetchArgs): string {
   return sha1Hex(Buffer.from(`${fingerprint}|${argsJson}`, 'utf8'));
 }
 
-function fetchResponse(rec: RepoRec, args: FetchArgs): Buffer {
+/**
+ * Fetch responses are cached as in-flight promises: the first request for a
+ * given negotiation starts the computation and every concurrent twin awaits
+ * the same promise, so walkCommits/objectClosure/writePack run once per
+ * distinct fetch no matter how many clones arrive together. The computed
+ * bytes are identical to a solo computation — the promise only shares them.
+ */
+function fetchResponse(rec: RepoRec, args: FetchArgs): Promise<Buffer> {
   if (!args.done && args.waitForDone) {
-    return Buffer.concat([pktText('acknowledgments'), pktText('ready'), PKT_FLUSH]);
+    return Promise.resolve(Buffer.concat([pktText('acknowledgments'), pktText('ready'), PKT_FLUSH]));
   }
   const key = fetchMemoKey(rec, args);
   const hit = rec.fetchCache.get(key);
   if (hit) return hit;
-  const out = computeFetchResponse(rec, args);
+  const pending = Promise.resolve().then(() => computeFetchResponse(rec, args));
   if (rec.fetchCache.size > 64) rec.fetchCache.clear();
-  rec.fetchCache.set(key, out);
-  return out;
+  rec.fetchCache.set(key, pending);
+  return pending;
 }
 
 function computeFetchResponse(rec: RepoRec, args: FetchArgs): Buffer {
@@ -300,7 +307,7 @@ async function uploadPack(forge: Forge, req: IncomingMessage, res: ServerRespons
   }
   if (commandLine === 'command=fetch') {
     const args = parseFetchArgs(packets);
-    sendBuffer(res, 200, fetchResponse(rec, args), UPLOAD_RESULT);
+    sendBuffer(res, 200, await fetchResponse(rec, args), UPLOAD_RESULT);
     return;
   }
   sendBuffer(res, 400, pktText('error: unknown command'), UPLOAD_RESULT);

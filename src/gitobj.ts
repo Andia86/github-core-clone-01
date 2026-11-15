@@ -618,8 +618,36 @@ export function mergeBase(store: ObjectStore, a: string, b: string): string | nu
   return best;
 }
 
+/**
+ * Closure memo, per store: a closure is fully determined by the commit set,
+ * the exclusion set and the store's contents — and the store only ever grows
+ * (objects are content-addressed and immutable), so its size fingerprints the
+ * contents. Callers mutate the returned set, so the memo hands out copies.
+ */
+const closureMemo = new WeakMap<ObjectStore, Map<string, Set<string>>>();
+
 /** Object closure (commits + trees + blobs + tags) for the given commits, restricted to the commit predicate. */
 export function objectClosure(
+  store: ObjectStore,
+  commitOids: Iterable<string>,
+  exclude: Set<string>,
+): Set<string> {
+  const commits = [...commitOids];
+  let memo = closureMemo.get(store);
+  if (!memo) {
+    memo = new Map();
+    closureMemo.set(store, memo);
+  }
+  const memoKey = `${store.size}|${commits.sort().join(',')}|${[...exclude].sort().join(',')}`;
+  const cached = memo.get(memoKey);
+  if (cached) return new Set(cached);
+  const out = computeObjectClosure(store, commits, exclude);
+  if (memo.size > 128) memo.clear();
+  memo.set(memoKey, out);
+  return new Set(out);
+}
+
+function computeObjectClosure(
   store: ObjectStore,
   commitOids: Iterable<string>,
   exclude: Set<string>,
