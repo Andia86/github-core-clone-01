@@ -279,7 +279,7 @@ function computeFetchResponse(rec: RepoRec, args: FetchArgs): Buffer {
       const obj = store.get(oid);
       if (obj) objects.push(obj);
     }
-    pack = writePack(objects, 1);
+    pack = writePack(objects, 0);
     if (rec.packCache.size > 64) rec.packCache.clear();
     rec.packCache.set(cacheKey, pack);
   }
