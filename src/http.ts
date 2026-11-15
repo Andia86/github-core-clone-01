@@ -11,14 +11,16 @@ export function nextRequestId(): string {
 }
 
 export function sendJson(res: ServerResponse, status: number, body: unknown, headers: Readonly<Record<string, string>> = {}): void {
-  const text = typeof body === 'string' ? body : `${JSON.stringify(body)}\n`;
+  // A Buffer body is sent as-is (the read hot path caches whole bodies);
+  // strings go out untouched and anything else is JSON with a trailing \n.
+  const buf = Buffer.isBuffer(body) ? body : Buffer.from(typeof body === 'string' ? body : `${JSON.stringify(body)}\n`, 'utf8');
   res.writeHead(status, {
     'content-type': JSON_TYPE,
-    'content-length': Buffer.byteLength(text),
+    'content-length': buf.length,
     'x-github-request-id': nextRequestId(),
     ...headers,
   });
-  res.end(text);
+  res.end(buf);
 }
 
 export function sendBuffer(res: ServerResponse, status: number, body: Buffer, contentType: string, headers: Readonly<Record<string, string>> = {}): void {

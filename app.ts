@@ -20,31 +20,40 @@ function pathOf(req: IncomingMessage): URL {
 
 export function createApp(): Server {
   const forge = new Forge(process.env.MAKEFUN_SHOP_TOKEN ?? '');
+  const expectedAuth = `Bearer ${forge.token}`;
   return createServer((req: IncomingMessage, res: ServerResponse) => {
     void (async () => {
       try {
         const url = pathOf(req);
         const method = req.method ?? 'GET';
+        const path = url.pathname;
 
-        if (method === 'GET' && url.pathname === '/healthz') {
+        if (method === 'GET' && path === '/healthz') {
           sendJson(res, 200, { ok: true });
           return;
         }
 
         // Every other surface requires the shop token as a bearer credential.
         const auth = req.headers.authorization ?? '';
-        if (auth !== `Bearer ${forge.token}`) {
+        if (auth !== expectedAuth) {
           badCredentials(res);
           return;
         }
 
-        if (await handleGitHttp(forge, req, res, url)) return;
+        // Fast lanes by path shape: git smart-HTTP paths are the only ones
+        // carrying a `.git/` segment outside the API tree, so REST traffic
+        // (the hot read/write paths) skips the git route regex entirely,
+        // and git traffic skips nothing it used to reach — dispatch order
+        // and outcomes are unchanged.
+        if (!path.startsWith('/api/') && path.includes('.git/')) {
+          if (await handleGitHttp(forge, req, res, url)) return;
+        }
         if (await handleRest(forge, req, res, url)) return;
-        if (url.pathname === '/api/graphql') {
+        if (path === '/api/graphql') {
           await handleGraphql(forge, req, res);
           return;
         }
-        if (url.pathname === '/mcp') {
+        if (path === '/mcp') {
           await handleMcp(forge, req, res);
           return;
         }

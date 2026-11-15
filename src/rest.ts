@@ -399,15 +399,20 @@ function issueView(repo: RepoRec, issue: IssueRec): Record<string, unknown> {
   return view;
 }
 
-/** The serialized issue body, cached per issue version: the perf read/write workloads hit this path. */
-export function issueBody(repo: RepoRec, issue: IssueRec): string {
+/**
+ * The serialized issue body as a ready-to-send Buffer, cached per issue
+ * version: the perf read/write workloads hit this path, and a warm hit is
+ * one Map lookup plus res.end(buf) — no stringify, no byteLength, no
+ * re-encode. Invalidated by the same touchRepo hook as the JSON cache.
+ */
+export function issueBody(repo: RepoRec, issue: IssueRec): Buffer {
   const key = `issue:${issue.number}:${issue.updatedAt}`;
-  let cached = repo.jsonCache.get(key);
+  let cached = repo.bodyCache.get(key);
   if (!cached) {
-    cached = JSON.stringify(issueJson(repo, issue));
-    repo.jsonCache.set(key, cached);
+    cached = Buffer.from(`${JSON.stringify(issueJson(repo, issue))}\n`, 'utf8');
+    repo.bodyCache.set(key, cached);
   }
-  return `${cached}\n`;
+  return cached;
 }
 
 async function createIssue(forge: Forge, req: IncomingMessage, res: ServerResponse, rec: RepoRec): Promise<void> {

@@ -82,6 +82,7 @@ export interface RepoRec {
   packCache: Map<string, Buffer>;
   fetchCache: Map<string, Promise<Buffer>>;
   jsonCache: Map<string, string>;
+  bodyCache: Map<string, Buffer>;
 }
 
 export class Forge {
@@ -121,6 +122,7 @@ export class Forge {
       packCache: new Map(),
       fetchCache: new Map(),
       jsonCache: new Map(),
+      bodyCache: new Map(),
     };
     for (const label of DEFAULT_LABELS) {
       rec.labels.set(label, { id: this.nextLabelId++, name: label, color: LABEL_COLORS[label] ?? 'ededed', description: '' });
@@ -156,6 +158,7 @@ export class Forge {
   touchRepo(rec: RepoRec): void {
     rec.updatedAt = nextTimestamp().iso;
     rec.jsonCache.clear();
+    rec.bodyCache.clear();
   }
 }
 
