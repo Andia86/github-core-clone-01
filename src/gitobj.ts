@@ -2,6 +2,7 @@
 // three-way tree merges and line diffs. Pure Node stdlib (zlib + crypto).
 
 import { createInflate, inflateSync, deflateSync, constants as zlibConstants } from 'node:zlib';
+import { createHash } from 'node:crypto';
 import { sha1Hex, ZERO_OID } from './util.ts';
 
 export type ObjType = 'commit' | 'tree' | 'blob' | 'tag';
@@ -134,6 +135,29 @@ export function parseTree(data: Buffer): TreeEntry[] {
   return out;
 }
 
+/**
+ * Parsed-tree memo, per store: tree objects are content-addressed and
+ * immutable, so a parse result never goes stale. Closures and tree
+ * flattening re-walk the same trees on every fetch; without the memo each
+ * walk re-parses every tree buffer from scratch.
+ */
+const treeEntriesMemo = new WeakMap<ObjectStore, Map<string, TreeEntry[]>>();
+
+export function treeEntries(store: ObjectStore, treeOid: string): TreeEntry[] {
+  let memo = treeEntriesMemo.get(store);
+  if (!memo) {
+    memo = new Map();
+    treeEntriesMemo.set(store, memo);
+  }
+  const hit = memo.get(treeOid);
+  if (hit) return hit;
+  const obj = store.get(treeOid);
+  const entries = obj && obj.type === 'tree' ? parseTree(obj.data) : [];
+  if (memo.size > 20000) memo.clear();
+  memo.set(treeOid, entries);
+  return entries;
+}
+
 export function serializeTree(entries: TreeEntry[]): Buffer {
   const sorted = [...entries].sort((a, b) => {
     const an = a.mode.startsWith('04') || a.mode === '40000' ? `${a.name}/` : a.name;
@@ -156,7 +180,7 @@ export function isTreeMode(mode: string): boolean {
 export function flattenTree(store: ObjectStore, treeOid: string, prefix = '', out = new Map<string, { oid: string; mode: string }>()): Map<string, { oid: string; mode: string }> {
   const obj = store.get(treeOid);
   if (!obj || obj.type !== 'tree') return out;
-  for (const e of parseTree(obj.data)) {
+  for (const e of treeEntries(store, treeOid)) {
     const path = prefix === '' ? e.name : `${prefix}/${e.name}`;
     if (isTreeMode(e.mode)) flattenTree(store, e.oid, path, out);
     else out.set(path, { oid: e.oid, mode: e.mode });
@@ -543,9 +567,15 @@ export function writePack(objects: Array<{ type: ObjType; data: Buffer }>, level
     parts.push(Buffer.from(bytes));
     parts.push(deflateSync(obj.data, { level }));
   }
-  const body = Buffer.concat(parts);
-  const trailer = Buffer.from(sha1Hex(body), 'hex');
-  return Buffer.concat([body, trailer]);
+  // The trailer hash feeds on the parts incrementally and the pack bytes
+  // are assembled in a single concat: the previous shape concatenated the
+  // parts into a body buffer, hashed that, then concatenated AGAIN to
+  // append the trailer — two full copies of every pack on the clone path.
+  const hash = createHash('sha1');
+  for (const part of parts) hash.update(part);
+  const trailer = Buffer.from(hash.digest('hex'), 'hex');
+  parts.push(trailer);
+  return Buffer.concat(parts);
 }
 
 // --- history walks -----------------------------------------------------------
@@ -658,7 +688,7 @@ function computeObjectClosure(
     const obj = store.get(treeOid);
     if (!obj || obj.type !== 'tree') return;
     out.add(treeOid);
-    for (const e of parseTree(obj.data)) {
+    for (const e of treeEntries(store, treeOid)) {
       if (exclude.has(e.oid) || out.has(e.oid)) continue;
       if (isTreeMode(e.mode)) addTree(e.oid);
       else out.add(e.oid);

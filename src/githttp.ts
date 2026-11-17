@@ -186,13 +186,13 @@ function fetchResponse(rec: RepoRec, args: FetchArgs): Promise<Buffer> {
   const key = fetchMemoKey(rec, args);
   const hit = rec.fetchCache.get(key);
   if (hit) return hit;
-  const pending = Promise.resolve().then(() => computeFetchResponse(rec, args));
+  const pending = Promise.resolve().then(() => computeFetchResponse(rec, args, key));
   if (rec.fetchCache.size > 64) rec.fetchCache.clear();
   rec.fetchCache.set(key, pending);
   return pending;
 }
 
-function computeFetchResponse(rec: RepoRec, args: FetchArgs): Buffer {
+function computeFetchResponse(rec: RepoRec, args: FetchArgs, memoKey: string): Buffer {
   const store = rec.store;
   // Resolve wants (oids, tag objects, want-refs).
   const wantOids: string[] = [];
@@ -264,24 +264,35 @@ function computeFetchResponse(rec: RepoRec, args: FetchArgs): Buffer {
 
   const packOids = objectClosure(store, included, exclude);
   for (const oid of extraObjects) packOids.add(oid);
-  for (const oid of [...packOids]) {
+  for (const oid of packOids) {
     if (!store.has(oid)) packOids.delete(oid);
   }
 
-  const cacheKey = sha1Hex(Buffer.from([...packOids].sort().join(','), 'utf8'));
-  let pack = rec.packCache.get(cacheKey);
+  // The pack is a deterministic function of the negotiation and the repo
+  // state fingerprint — both already hashed into the fetch memo key — so
+  // the memo key names the pack too. The previous key sorted and joined
+  // every pack oid into one long string and hashed it on EVERY fetch,
+  // cache hit or not; that string grew with the whole closure.
+  let pack = rec.packCache.get(memoKey);
   if (!pack) {
+    // Commits first (generation order), then trees, blobs, tags — sorted
+    // into buckets in ONE pass over the closure. The previous shape ran
+    // four full filter passes, each re-walking the set and re-reading
+    // every object's type from the store.
+    const buckets: Record<string, string[]> = { commit: [], tree: [], blob: [], tag: [] };
+    for (const oid of packOids) {
+      const obj = store.get(oid);
+      if (obj) (buckets[obj.type] as string[]).push(oid);
+    }
+    (buckets.commit as string[]).sort((a, b) => (gens.get(a) ?? 0) - (gens.get(b) ?? 0));
     const objects: GitObj[] = [];
-    // Commits first (generation order), then trees, blobs, tags.
-    const byType = (t: string) => [...packOids].filter((oid) => store.get(oid)?.type === t);
-    const commits = byType('commit').sort((a, b) => (gens.get(a) ?? 0) - (gens.get(b) ?? 0));
-    for (const oid of [...commits, ...byType('tree'), ...byType('blob'), ...byType('tag')]) {
+    for (const oid of [...(buckets.commit as string[]), ...(buckets.tree as string[]), ...(buckets.blob as string[]), ...(buckets.tag as string[])]) {
       const obj = store.get(oid);
       if (obj) objects.push(obj);
     }
     pack = writePack(objects, 0);
     if (rec.packCache.size > 64) rec.packCache.clear();
-    rec.packCache.set(cacheKey, pack);
+    rec.packCache.set(memoKey, pack);
   }
 
   const parts: Buffer[] = [];
