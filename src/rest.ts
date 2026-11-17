@@ -16,6 +16,7 @@ import {
   labelJson,
   userJson,
   branchTip,
+  findByNumber,
 } from './store.ts';
 import {
   parseTree,
@@ -813,8 +814,8 @@ export async function handleRest(forge: Forge, req: IncomingMessage, res: Server
       }
       if (rest.length >= 2) {
         const number = Number(rest[1]);
-        const issue = rec.issues.find((i) => i.number === number);
-        const pull = rec.pulls.find((p) => p.number === number);
+        const issue = findByNumber(rec.issues, number);
+        const pull = findByNumber(rec.pulls, number);
         if (rest.length === 2) {
           if (method === 'GET') {
             if (issue) {
@@ -881,7 +882,7 @@ export async function handleRest(forge: Forge, req: IncomingMessage, res: Server
       }
       if (rest.length >= 2) {
         const number = Number(rest[1]);
-        const pull = rec.pulls.find((p) => p.number === number);
+        const pull = findByNumber(rec.pulls, number);
         if (!pull) {
           notFound(res);
           return true;

@@ -85,6 +85,26 @@ export interface RepoRec {
   bodyCache: Map<string, Buffer>;
 }
 
+/**
+ * Binary search over an append-only record array. Issues and pulls are
+ * only ever pushed (REST, GraphQL and MCP creation sites all push) with
+ * numbers taken from the repo's single increasing nextNumber counter, so
+ * each array is strictly ascending by number and a lookup is O(log n)
+ * instead of a linear scan that grows with the repo's history.
+ */
+export function findByNumber<T extends { number: number }>(items: readonly T[], number: number): T | undefined {
+  let lo = 0;
+  let hi = items.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const item = items[mid] as T;
+    if (item.number === number) return item;
+    if (item.number < number) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return undefined;
+}
+
 export class Forge {
   readonly token: string;
   viewerLogin = VIEWER_LOGIN;
@@ -190,6 +210,10 @@ export function labelJson(rec: LabelRec): Record<string, unknown> {
 }
 
 export function repoJson(rec: RepoRec): Record<string, unknown> {
+  // Counted once: the two open-count fields below used to run three
+  // separate filter passes over the issue and pull arrays per call.
+  const openIssues = rec.issues.reduce((n, i) => n + (i.state === 'open' ? 1 : 0), 0);
+  const openPulls = rec.pulls.reduce((n, p) => n + (p.state === 'open' ? 1 : 0), 0);
   return {
     id: rec.id,
     node_id: globalId('Repository', rec.id),
@@ -221,14 +245,14 @@ export function repoJson(rec: RepoRec): Record<string, unknown> {
     mirror_url: null,
     archived: false,
     disabled: false,
-    open_issues_count: rec.issues.filter((i) => i.state === 'open').length + rec.pulls.filter((p) => p.state === 'open').length,
+    open_issues_count: openIssues + openPulls,
     license: null,
     allow_forking: true,
     is_template: false,
     topics: [],
     visibility: rec.private ? 'private' : 'public',
     forks: 0,
-    open_issues: rec.issues.filter((i) => i.state === 'open').length,
+    open_issues: openIssues,
     watchers: 0,
     default_branch: rec.defaultBranch,
   };

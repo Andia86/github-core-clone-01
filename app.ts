@@ -3,7 +3,7 @@
 // GitHub-shaped JSON 404. main.ts owns the lifecycle; this file is the app.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { Forge } from './src/store.ts';
+import { Forge, findByNumber } from './src/store.ts';
 import { handleRest, issueBody } from './src/rest.ts';
 import { handleGitHttp } from './src/githttp.ts';
 import { handleGraphql } from './src/graphql.ts';
@@ -51,7 +51,7 @@ export function createApp(): Server {
           if (m && m[1] === forge.viewerLogin) {
             const rec = forge.getRepo(m[1], m[2] as string);
             if (rec) {
-              const issue = rec.issues.find((i) => i.number === Number(m[3]));
+              const issue = findByNumber(rec.issues, Number(m[3]));
               if (issue) {
                 sendJson(res, 200, issueBody(rec, issue));
                 return;
